@@ -1,0 +1,20 @@
+{
+  "name": "lottery-platform",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "build": "vite build",
+    "preview": "vite preview",
+    "test:settle": "esbuild scripts/smoke-settle.mjs --bundle --format=esm --platform=node --alias:@=./src --outfile=node_modules/.cache/smoke-settle.bundle.mjs --log-level=warning && node node_modules/.cache/smoke-settle.bundle.mjs"
+  },
+  "dependencies": {
+    "pinia": "^2.1.7",
+    "vue": "^3.4.21"
+  },
+  "devDependencies": {
+    "@vitejs/plugin-vue": "^5.0.4",
+    "vite": "^5.2.8"
+  }
+}
