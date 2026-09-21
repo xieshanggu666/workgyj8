@@ -68,6 +68,8 @@ export const usePlatformStore = defineStore('platform', {
     taskClaims: [],             // 任务领奖台账（append-only）：{ taskId, bizDate 归属业务日, grantDate 实际发放日, reward }，防重复发奖的唯一判重依据
     riskOrders: [],             // 风控审核单
     auditLogs: [],              // 操作记录（审计日志）
+    reconBills: [],             // 积分库存对账差异单（按业务日，append-only 保留执行/复核/补偿痕迹）
+    stockAdjustments: [],       // 库存校正台账（append-only）：对账补偿对 remain 的修正凭证
     riskRules: { ...DEFAULT_RISK_RULES, blacklist: [...DEFAULT_RISK_RULES.blacklist] },
     todayDate: todayStr(),
     activeTab: 'home',
@@ -171,8 +173,31 @@ export const usePlatformStore = defineStore('platform', {
         pendingRisk: state.riskOrders.filter((o) => o.status === 'pending' || o.status === 'appealed').length,
         frozenPoints: state.riskOrders
           .filter((o) => o.status === 'pending' || o.status === 'appealed')
-          .reduce((sum, o) => sum + (o.frozenPoints || 0), 0)
+          .reduce((sum, o) => sum + (o.frozenPoints || 0), 0),
+        // 对账看板：对账业务日数、待复核差异单数、累计补偿积分、库存校正次数
+        reconDays: state.reconBills.length,
+        reconOpen: state.reconBills.filter((b) => ['pending', 'reviewed'].includes(b.status)).length,
+        reconCompensated: state.pointRecords
+          .filter((p) => p.kind === 'recon-comp' || p.kind === 'task-comp')
+          .reduce((s, p) => s + p.delta, 0),
+        stockAdjCount: state.stockAdjustments.length
       }
+    },
+    // 某业务日的对账差异单（一业务日一单，重复执行更新同单并保留痕迹）
+    reconBillOf: (s) => (date) => s.reconBills.find((b) => b.date === date) || null,
+    // 存在差异、尚未平账的对账单元数（看板/Tab 角标）
+    reconOpenCount(s) {
+      return s.reconBills.filter((b) => ['pending', 'reviewed'].includes(b.status)).length
+    },
+    // 可选对账业务日：有业务记录/审核单/任务台账/已有对账单的日期，倒序
+    reconDates(s) {
+      const dates = new Set()
+      s.records.forEach((r) => dates.add(r.date))
+      s.riskOrders.forEach((o) => dates.add(o.createdAt))
+      s.taskClaims.forEach((c) => { dates.add(c.bizDate); dates.add(c.grantDate) })
+      s.reconBills.forEach((b) => dates.add(b.date))
+      dates.add(s.todayDate)
+      return [...dates].sort().reverse()
     }
   },
 
@@ -245,18 +270,40 @@ export const usePlatformStore = defineStore('platform', {
     },
 
     // ===== 积分流水（append-only，禁止改写历史行） =====
-    addPointRecord(delta, note, kind = 'normal') {
+    // extra（可选）：
+    //   bizDate 该笔归属业务日（跨日补偿/补计用；默认取实际发生业务日 todayDate）
+    //   refId   关联业务凭证（任务台账/对账差异单 id），用于逐笔勾稽与幂等判重
+    //   refType 关联类型：task-claim | recon-comp
+    addPointRecord(delta, note, kind = 'normal', extra = {}) {
+      // 常规流水取当前时刻；对历史业务日补账的流水（任务结算/对账补偿/放行发奖）显式续在现有链末端 +1ms，
+      // 保证其"期末余额"快照在按 ts 重放时落在链尾、余额链连续
+      const appendFlow = extra.bizDate && extra.bizDate !== (extra.date || this.todayDate)
+      const isChainTail = kind === 'recon-comp' || kind === 'task-comp' ||
+        (appendFlow && (kind === 'reward' || kind === 'release'))
+      const latestTs = isChainTail
+        ? this.pointRecords.reduce((mx, p) => Math.max(mx, p.ts || 0), Date.now())
+        : 0
       this.pointRecords.unshift({
         id: genId('pr'),
-        date: this.todayDate,
-        time: nowTime(),
-        ts: Date.now(),
+        date: extra.date || this.todayDate,
+        bizDate: extra.bizDate || extra.date || this.todayDate,
+        time: extra.time || nowTime(),
+        ts: extra.ts || (isChainTail ? latestTs + 1 : Date.now()),
         delta,
-        balance: this.points,
+        // 余额快照：调用方先改 this.points 再记账，快照即记账后余额
+        balance: extra.balance !== undefined ? extra.balance : this.points,
         note,
-        kind // normal | frozen | release | refund | reward
+        kind, // normal | frozen | release | refund | reward | task-comp | recon-comp
+        refId: extra.refId || '',
+        refType: extra.refType || ''
       })
-      if (this.pointRecords.length > 200) this.pointRecords.pop()
+      if (this.pointRecords.length > 300) this.popIfTrimmed()
+    },
+    popIfTrimmed() {
+      // 补偿/对账流水优先保留，裁剪最老的普通流水（append-only 历史行不被改写，仅控制演示内存）
+      const oldest = [...this.pointRecords].reverse().find((p) => !['recon-comp', 'task-comp'].includes(p.kind))
+      if (oldest) this.pointRecords.splice(this.pointRecords.indexOf(oldest), 1)
+      else this.pointRecords.pop()
     },
 
     // ===== 操作记录（审计日志） =====
@@ -272,7 +319,11 @@ export const usePlatformStore = defineStore('platform', {
           config: '规则变更',
           'task-settle': '任务结算',
           'switch-role': '视角切换',
-          'day-rollover': '业务日切换'
+          'day-rollover': '业务日切换',
+          'recon-run': '对账执行',
+          'recon-review': '对账复核',
+          'recon-comp': '对账补偿',
+          'recon-inject': '差异注入'
         }[action] || action,
         orderId: orderId || '',
         operator: this.role === 'operator' ? `运营(${this.user.name})` : this.user.name,
@@ -347,7 +398,10 @@ export const usePlatformStore = defineStore('platform', {
           ts: Date.now(),
           source: 'auto'
         })
-        this.addPointRecord(t.reward, `任务结算：${t.label}${crossDay ? `（${date} 业务日补计）` : ''}`, 'reward')
+        // 流水实际发放日为今日，但 bizDate 标注归属业务日（跨日补计计入原业务日对账，不串当日账）
+        this.addPointRecord(t.reward, `任务结算：${t.label}${crossDay ? `（${date} 业务日补计）` : ''}`, 'reward', {
+          bizDate: date
+        })
         this.addAuditLog('task-settle', null,
           `抽奖任务【${t.label}】达成（${date} 有效参与 ${valid}/${t.goal}），自动发放 ${t.reward} 积分${crossDay ? '（跨日审核补计）' : ''}`)
         settled.push(t)
@@ -668,11 +722,13 @@ export const usePlatformStore = defineStore('platform', {
           const prize = act?.prizes.find((p) => p.id === o.targetId)
           if (prize) prize.frozen = Math.max(0, prize.frozen - 1)
         }
-        // 积分奖品此刻才入账
+        // 积分奖品此刻才入账（归属原参与业务日；跨日审核时流水续在链尾、对账不串当日）
         const n = parseInt(o.targetName) || 0
         if (o.targetName.includes('积分') && n > 0) {
           this.points += n
-          this.addPointRecord(n, `审核放行：抽奖奖品【${o.targetName}】`, 'release')
+          this.addPointRecord(n, `审核放行：抽奖奖品【${o.targetName}】`, 'release', {
+            bizDate: o.createdAt
+          })
         }
       } else {
         const g = this.goods.find((x) => x.id === o.targetId)
@@ -767,6 +823,438 @@ export const usePlatformStore = defineStore('platform', {
       // 业务动作落账前确保业务日一致（统一走业务日切换）
       this.syncBusinessDay()
       return true
+    },
+
+    // ===== 积分库存对账 =====
+    // 对账口径（按业务日 D）：
+    //  P1 积分发生额：业务侧（抽奖成本/中奖积分、兑换成本/撤销返还、任务奖励）推导的应有净额
+    //                vs 积分流水实际净额（补偿流水单列），残差即少记/多记
+    //  P2 任务奖励台账：taskClaims 每笔领奖必须有对应流水（跨日补计按发放日勾稽）
+    //  P3 余额链：append-only 流水余额快照逐笔连续，且最新一行余额 == 当前可用积分（安全网）
+    //  P4 冻结单据（当前态）：在审单与业务记录状态一致、冻结积分=业务成本、预占库存=账面 frozen
+    //  P5 库存账实（当前态）：应有 remain = 初始库存 - 有效消耗 + 库存校正，与实物账逐 SKU 比对
+    //
+    // 幂等：一业务日一张差异单，签名（各类残差指纹）不变即同一版本；重复执行只追加执行痕迹，不重建、不重复补偿。
+    // 跨日：补偿流水带 bizDate 归属原业务日、date 为实际处理日；风控放行/撤销的积分动作按审核日入账。
+    // 留痕：原始流水/业务记录/库存行永不改写，所有修正只追加补偿流水与库存校正台账。
+
+    _flowBizDate(p) {
+      return p.bizDate || p.date
+    },
+    _orderOfRecord(recordId) {
+      return this.riskOrders.find((o) => o.recordId === recordId)
+    },
+    _reviewDate(order) {
+      return (order?.reviewedAt || '').slice(0, 10)
+    },
+    // 抽奖记录对应的积分成本（免费活动为 0）
+    _drawCostOf(rec) {
+      const act = this.activities.find((a) => a.id === rec.activityId)
+      return act && act.costType === 'points' ? (act.cost || 0) : 0
+    },
+    // 抽奖中奖积分（仅积分奖品）
+    _drawPrizePoints(rec) {
+      return rec.prizeName && rec.prizeName.includes('积分') ? (parseInt(rec.prizeName) || 0) : 0
+    },
+
+    // 计算某业务日的对账差异（纯推导，不落库；补偿流水/校正台账参与勾稽）
+    computeReconDiffs(date) {
+      const flowsOn = (d) => this.pointRecords.filter((p) => this._flowBizDate(p) === d)
+      const isComp = (p) => p.kind === 'recon-comp' || p.kind === 'task-comp'
+      const dayFlows = flowsOn(date)
+
+      // —— P1 积分发生额 ——
+      // 业务侧逐笔推导应有流水（同日同额合成明细，供差异单展示勾稽过程）
+      const expectedDetail = []
+      let expectedNet = 0
+      const pushExpect = (delta, label, effDate) => {
+        if (effDate !== date) return
+        expectedNet += delta
+        expectedDetail.push({ delta, label })
+      }
+      this.records.forEach((r) => {
+        if (r.type === 'draw') {
+          // 成本：落账即扣（正常/冻结/撤销都曾扣减），撤销返还按审核日另计
+          const cost = this._drawCostOf(r)
+          if (cost) pushExpect(-cost, `抽奖成本：${r.activityName}`, r.date)
+          // 中奖积分：正常按参与日入账；放行按审核日入账；撤销/冻结中无
+          const prize = this._drawPrizePoints(r)
+          if (prize && r.status === 'normal') pushExpect(prize, `抽奖中奖：${r.prizeName}`, r.date)
+          // 放行发奖流水归属原参与业务日（实际发放日见流水 date，跨日不串当日净额）
+          if (prize && r.status === 'released') pushExpect(prize, `审核放行发奖：${r.prizeName}（${this._reviewDate(this._orderOfRecord(r.id))} 入账）`, r.date)
+          // 撤销返还冻结成本（按审核日）
+          if (r.status === 'revoked') {
+            const o = this._orderOfRecord(r.id)
+            if (o?.frozenPoints) pushExpect(o.frozenPoints, '撤销返还：抽奖冻结积分', this._reviewDate(o))
+          }
+        } else if (r.type === 'redeem') {
+          const g = this.goods.find((x) => x.id === r.goodsId)
+          const cost = g?.cost || 0
+          if (cost) pushExpect(-cost, `兑换扣减：${r.goodsName}`, r.date)
+          if (r.status === 'revoked') {
+            const o = this._orderOfRecord(r.id)
+            if (o?.frozenPoints) pushExpect(o.frozenPoints, '撤销返还：兑换冻结积分', this._reviewDate(o))
+          }
+        }
+      })
+      // 手动任务奖励：以 reward 类"完成任务"流水为业务凭证（补记的 task-comp 补偿流不计入应有发生额）
+      dayFlows.forEach((p) => {
+        if (!isComp(p) && p.kind === 'reward' && p.note.startsWith('完成任务：')) {
+          expectedNet += p.delta
+          expectedDetail.push({ delta: p.delta, label: p.note })
+        }
+      })
+      // 抽奖任务台账：归属业务日为 bizDate（跨日补计计入原业务日，不串审核当日账）；
+      // 实际发放日 grantDate 记录在台账与流水上。缺记台账无流水，体现为 P1 残差由 P2 逐笔列出。
+      this.taskClaims.forEach((c) => {
+        if (c.bizDate === date) {
+          expectedNet += c.reward
+          expectedDetail.push({
+            delta: c.reward,
+            label: `任务结算：${c.taskLabel}${c.grantDate !== c.bizDate ? `（${c.grantDate} 跨日补计）` : ''}`
+          })
+        }
+      })
+
+      const ledgerNet = dayFlows.filter((p) => !isComp(p)).reduce((s, p) => s + p.delta, 0)
+      const compNet = dayFlows.filter(isComp).reduce((s, p) => s + p.delta, 0)
+      const residual = expectedNet - ledgerNet - compNet
+
+      // —— P2 任务奖励逐笔勾稽（按归属业务日 bizDate；跨日补计的流水带相同 bizDate） ——
+      // 候选流水：原始"任务结算"reward 流（按任务名匹配）或 task-comp 补偿流（按台账 id 精确匹配）
+      const usedFlowIds = new Set()
+      const taskItems = this.taskClaims
+        .filter((c) => c.bizDate === date)
+        .map((c) => {
+          const comp = this.pointRecords.find((p) => p.kind === 'task-comp' && p.refId === c.id)
+          if (comp) { usedFlowIds.add(comp.id); return null }
+          const cand = this.pointRecords.find((p) =>
+            !usedFlowIds.has(p.id) && !isComp(p) && p.kind === 'reward' &&
+            this._flowBizDate(p) === date && p.delta === c.reward &&
+            p.note.includes('任务结算') && p.note.includes(c.taskLabel))
+          if (cand) { usedFlowIds.add(cand.id); return null }
+          return {
+            key: `task-${c.id}`, claimId: c.id, label: c.taskLabel, reward: c.reward,
+            bizDate: c.bizDate, grantDate: c.grantDate, autoFixable: true
+          }
+        })
+        .filter(Boolean)
+      // P1 残差 = 应有净额 − 原始流水净额 − 已补偿净额；P2 缺笔是其中的逐笔明细
+      const pointsResidual = residual
+
+      // —— P3 余额链连续性（当前态安全网） ——
+      const sorted = [...this.pointRecords].sort((a, b) => a.ts - b.ts)
+      let bal = this.points - sorted.reduce((s, p) => s + p.delta, 0)
+      let brokenRows = 0
+      let firstBad = null
+      sorted.forEach((p) => {
+        bal += p.delta
+        if (p.balance !== bal) {
+          brokenRows += 1
+          if (!firstBad) firstBad = { id: p.id, expect: bal, actual: p.balance, note: p.note, date: p.date }
+        }
+      })
+      const head = sorted[sorted.length - 1]
+      const chainItem = (brokenRows > 0 || (head && head.balance !== this.points)) ? {
+        brokenRows,
+        firstBad,
+        headBalance: head ? head.balance : null,
+        pointsBalance: this.points,
+        autoFixable: false   // 不直接改余额/快照；P1/P2 补偿使余额与流水同步后自愈
+      } : null
+
+      // —— P4 风控冻结单据一致性（当前态） ——
+      const frozenItems = []
+      const heldByTarget = new Map()
+      this.riskOrders.filter((o) => o.status === 'pending' || o.status === 'appealed').forEach((o) => {
+        // 预占键：奖品按 活动id+奖品id（不同活动奖品 id 可能重复），商品按 goodsId
+        const key = o.bizType === 'draw' ? `prize:${o.activityId}:${o.targetId}` : `goods:${o.targetId}`
+        heldByTarget.set(key, (heldByTarget.get(key) || 0) + (o.stockHeld || 0))
+        const rec = this.records.find((r) => r.id === o.recordId)
+        if (!rec || rec.status !== 'frozen') {
+          frozenItems.push({ key: `order-status-${o.id}`, orderId: o.id, kind: 'order-status',
+            target: o.targetName, expect: '业务记录冻结中', actual: rec ? rec.status : '记录缺失', autoFixable: false })
+        }
+        const expectCost = o.bizType === 'draw'
+          ? (this.activities.find((a) => a.id === o.activityId)?.costType === 'points'
+              ? (this.activities.find((a) => a.id === o.activityId)?.cost || 0) : 0)
+          : (this.goods.find((g) => g.id === o.targetId)?.cost || 0)
+        if ((o.frozenPoints || 0) !== expectCost) {
+          frozenItems.push({ key: `order-points-${o.id}`, orderId: o.id, kind: 'order-points',
+            target: o.targetName, expect: expectCost, actual: o.frozenPoints || 0, autoFixable: false })
+        }
+      })
+      // 预占库存 vs 账面 frozen（key 形如 prize:act-1:p1 / goods:g1）
+      const checkHeld = (key, name, book) => {
+        const held = heldByTarget.get(key) || 0
+        if (held !== (book || 0)) {
+          frozenItems.push({ key: `held-${key}`, kind: 'stock-held',
+            target: name, expect: held, actual: book || 0, autoFixable: false })
+        }
+      }
+      this.activities.forEach((a) => a.prizes.forEach((p) => {
+        if (p.rarity !== 'none') checkHeld(`prize:${a.id}:${p.id}`, `${a.name} / ${p.name}`, p.frozen)
+      }))
+      this.goods.forEach((g) => checkHeld(`goods:${g.id}`, g.name, g.frozen))
+
+      // —— P5 库存账实（当前态；应有 = 初始库存 - 有效消耗 + 已校正） ——
+      const consumedAllOf = (test) => this.records.filter((r) => r.status !== 'revoked' && test(r)).length
+      const stockItems = []
+      const pushStock = (targetType, activityId, id, name, icon, item) => {
+        const isPrize = targetType === 'prize'
+        const heldKey = isPrize ? `prize:${activityId}:${id}` : `goods:${id}`
+        const consumed = isPrize
+          ? consumedAllOf((r) => r.type === 'draw' && r.activityId === activityId && r.prizeId === id)
+          : consumedAllOf((r) => r.type === 'redeem' && r.goodsId === id)
+        const adjusted = this.stockAdjustments
+          .filter((x) => x.targetType === targetType && x.targetKey === heldKey)
+          .reduce((s, x) => s + x.delta, 0)
+        const expected = item.stock - consumed + adjusted
+        const diff = expected - item.remain
+        // 当日消耗/回补（展示用）：有效消耗按业务日，撤销回补按审核日
+        const dayConsumed = this.records.filter(
+          (r) => isPrize
+            ? (r.type === 'draw' && r.activityId === activityId && r.prizeId === id)
+            : (r.type === 'redeem' && r.goodsId === id)
+        ).filter((r) => {
+          if (r.status === 'revoked') return this._reviewDate(this._orderOfRecord(r.id)) === date
+          return r.date === date
+        }).reduce((n, r) => n + (r.status === 'revoked' ? -1 : 1), 0)
+        if (diff !== 0 || dayConsumed !== 0) {
+          stockItems.push({
+            key: `stock-${heldKey}`, targetType, activityId, targetId: id, targetKey: heldKey,
+            name, icon,
+            stock: item.stock, consumed, adjusted, expected, actual: item.remain,
+            diff, dayConsumed, frozenHeld: heldByTarget.get(heldKey) || 0, frozenBook: item.frozen || 0,
+            autoFixable: diff !== 0
+          })
+        }
+      }
+      this.activities.forEach((a) => a.prizes.forEach((p) => {
+        if (p.rarity !== 'none') pushStock('prize', a.id, p.id, `${a.name} / ${p.name}`, p.emoji, p)
+      }))
+      this.goods.forEach((g) => pushStock('goods', null, g.id, g.name, g.icon, g))
+
+      const taskOpen = taskItems.length
+      const stockOpen = stockItems.filter((x) => x.diff !== 0).length
+      const openCount = (pointsResidual !== 0 ? 1 : 0) + taskOpen + (chainItem ? 1 : 0) +
+        frozenItems.length + stockOpen
+
+      return {
+        date,
+        generatedAt: Date.now(),
+        points: { expectedNet, ledgerNet, compNet, residual: pointsResidual, autoFixable: pointsResidual > 0, detail: expectedDetail },
+        tasks: taskItems,
+        chain: chainItem,
+        frozen: frozenItems,
+        stock: stockItems,
+        openCount
+      }
+    },
+
+    // 差异指纹（残差/缺笔/不一致项完全相同即同一版本，重复执行幂等）
+    _reconSignature(d) {
+      return JSON.stringify({
+        p: d.points.residual,
+        t: d.tasks.map((x) => x.claimId).sort(),
+        c: d.chain ? 1 : 0,
+        f: d.frozen.map((x) => `${x.key}:${x.expect}/${x.actual}`),
+        s: d.stock.filter((x) => x.diff !== 0).map((x) => `${x.targetType}:${x.targetId}:${x.diff}`)
+      })
+    },
+
+    // 执行对账（一业务日一张单；历史日不触发业务日切换/兜底结算）
+    runRecon(date, silent = false) {
+      if (date === this.todayDate || !date) this.syncBusinessDay()
+      const d = date || this.todayDate
+      const diffs = this.computeReconDiffs(d)
+      const signature = this._reconSignature(diffs)
+      let bill = this.reconBills.find((b) => b.date === d)
+      const runAt = { at: `${this.todayDate} ${nowTime()}`, ts: Date.now(),
+        operator: this.role === 'operator' ? `运营(${this.user.name})` : this.user.name,
+        openCount: diffs.openCount, balanced: diffs.openCount === 0 }
+
+      if (!bill) {
+        bill = {
+          id: genId('rc'), date: d,
+          status: diffs.openCount === 0 ? 'balanced' : 'pending',
+          signature, diffs,
+          runs: [runAt], compensations: [],
+          firstAt: runAt.at, reviewedAt: '', reviewer: '', reviewNote: '',
+          createdAt: this.todayDate
+        }
+        this.reconBills.unshift(bill)
+      } else {
+        const sameVersion = bill.signature === signature
+        bill.diffs = diffs
+        bill.signature = signature
+        bill.runs.unshift(runAt)
+        if (bill.runs.length > 50) bill.runs.pop()
+        if (!sameVersion) {
+          // 业务有变化导致残差改变：已平→待复核；曾经的复核/补偿结论保留在 reviewedAt/compensations
+          if (diffs.openCount === 0) bill.status = bill.compensations.length ? 'compensated' : 'balanced'
+          else bill.status = 'pending'
+        }
+        // 同版本但当前已平：已补偿单保持"已补偿平账"（重复执行幂等，不回退状态）
+        if (sameVersion && diffs.openCount === 0 && bill.compensations.length && bill.status !== 'compensated') {
+          bill.status = 'compensated'
+        }
+      }
+
+      this.addAuditLog('recon-run', bill.id,
+        diffs.openCount === 0
+          ? `业务日 ${d} 对账完成：账实相符，无差异（积分应有净额 ${diffs.points.expectedNet}，流水净额 ${diffs.points.ledgerNet}）`
+          : `业务日 ${d} 对账完成：发现 ${diffs.openCount} 项未平差异（积分残差 ${diffs.points.residual}、任务缺记 ${diffs.tasks.length} 笔、库存 ${diffs.stock.filter((x) => x.diff).length} SKU、冻结 ${diffs.frozen.length} 项${diffs.chain ? '、余额链断裂' : ''}）`)
+      if (!silent) {
+        if (diffs.openCount === 0) this.showToast(`🧮 ${d} 对账完成：账实相符`, 'success')
+        else this.showToast(`🧮 ${d} 对账完成：${diffs.openCount} 项差异待运营复核`, 'warn')
+      }
+      return bill
+    },
+
+    // 运营复核差异单（确认差异属实，进入可补偿状态；不改动任何账目）
+    reviewRecon(date, note = '') {
+      if (this.role !== 'operator') {
+        this.showToast('仅运营可复核对账差异单', 'warn')
+        return false
+      }
+      const bill = this.reconBills.find((b) => b.date === date)
+      if (!bill) { this.showToast('请先执行对账', 'warn'); return false }
+      if (bill.diffs.openCount === 0) { this.showToast('该业务日账实相符，无需复核', 'info'); return false }
+      bill.status = 'reviewed'
+      bill.reviewedAt = `${this.todayDate} ${nowTime()}`
+      bill.reviewer = this.user.name
+      bill.reviewNote = note.trim()
+      this.addAuditLog('recon-review', bill.id,
+        `复核业务日 ${date} 的对账差异：${note.trim() || '确认差异属实，待补偿修正'}（原始记录保留，仅允许追加补偿流水）`)
+      this.showToast(`已复核 ${date} 差异单，可执行补偿修正`, 'success')
+      return true
+    },
+
+    // 复核通过后补偿：只追加补偿流水/库存校正，同步余额、库存；重复执行对已平项幂等跳过
+    compensateRecon(date, note = '') {
+      if (this.role !== 'operator') {
+        this.showToast('仅运营可执行对账补偿', 'warn')
+        return null
+      }
+      const bill0 = this.reconBills.find((b) => b.date === date)
+      if (!bill0 || bill0.status === 'pending') { this.showToast('请先完成差异复核，再执行补偿', 'warn'); return null }
+      if (bill0.status === 'balanced' && !bill0.diffs.openCount) { this.showToast('该业务日账实相符，无需补偿', 'info'); return null }
+      // 以最新账实重新推导（防止复核后业务又有变化导致错补）
+      const live = this.computeReconDiffs(date)
+      const actions = []
+
+      // 1) 任务奖励逐笔补记（余额与流水同步追加，保留原始记录）
+      live.tasks.forEach((item) => {
+        if (this.pointRecords.some((p) => p.kind === 'task-comp' && p.refId === item.claimId)) return // 幂等
+        this.points += item.reward
+        const cross = item.grantDate !== item.bizDate ? `（归属 ${item.bizDate} 跨日补计）` : ''
+        this.addPointRecord(item.reward, `对账补偿：任务奖励补记【${item.label}】${cross}`, 'task-comp', {
+          bizDate: item.bizDate, refId: item.claimId, refType: 'task-claim'
+        })
+        actions.push({ type: 'task', label: item.label, delta: item.reward })
+      })
+
+      // 2) 积分净额残差（>0 业务真实、流水少记 → 补流水并同步余额；<0 为长款/多记，需人工核查不自动扣减）
+      const live2 = this.computeReconDiffs(date)
+      const pr = live2.points.residual
+      if (pr > 0) {
+        this.points += pr
+        this.addPointRecord(pr, `对账补偿：${date} 积分净额差异（业务流水少记，按差异单补记）`, 'recon-comp', {
+          bizDate: date, refId: bill0.id, refType: 'recon-bill'
+        })
+        actions.push({ type: 'points', label: '积分净额残差', delta: pr })
+      }
+      const manualPoints = pr < 0 ? Math.abs(pr) : 0
+
+      // 3) 库存校正：账实差异以调整凭证把"账面应有"对齐实物（盘亏记 -1、盘盈记 +1），
+      //    不凭空回补/扣减实物；追加 append-only 库存校正台账
+      live2.stock.filter((x) => x.diff !== 0).forEach((x) => {
+        const target = x.targetType === 'prize'
+          ? this.activities.find((a) => a.id === x.activityId)?.prizes.find((p) => p.id === x.targetId)
+          : this.goods.find((g) => g.id === x.targetId)
+        if (!target) return
+        const before = target.remain
+        // 注入一笔 -diff 的账存调整凭证：expected = stock - consumed + adjusted = actual
+        this.stockAdjustments.unshift({
+          id: genId('sa'), billId: bill0.id, bizDate: date,
+          date: this.todayDate, time: nowTime(), ts: Date.now(),
+          targetType: x.targetType, targetId: x.targetId, targetKey: x.targetKey,
+          activityId: x.activityId || null, targetName: x.name,
+          delta: -x.diff, before, after: before,
+          reason: note.trim() || (x.diff > 0
+            ? '对账差异补偿：实物盘亏，按差异单登记库存调整（账面核销）'
+            : '对账差异补偿：实物盘盈，按差异单登记库存调整（账面补登）'),
+          operator: this.user.name
+        })
+        actions.push({ type: 'stock', label: x.name, delta: -x.diff })
+      })
+
+      if (!actions.length && !manualPoints && !live2.chain && !live2.frozen.length) {
+        this.showToast('账目已平，无需重复补偿', 'info')
+        return null
+      }
+
+      const pointDelta = actions.filter((a) => a.type !== 'stock').reduce((s, a) => s + a.delta, 0)
+      const stockCount = actions.filter((a) => a.type === 'stock').length
+      if (actions.length) {
+        bill0.compensations.unshift({
+          id: genId('rcc'), at: `${this.todayDate} ${nowTime()}`,
+          pointDelta, stockCount, note: note.trim(), reviewer: this.user.name,
+          items: actions.map((a) => ({ ...a }))
+        })
+      }
+      this.addAuditLog('recon-comp', bill0.id,
+        `补偿业务日 ${date} 差异：` +
+        actions.map((a) => a.type === 'stock'
+          ? `库存【${a.label}】校正 ${a.delta > 0 ? '+' : ''}${a.delta}`
+          : `【${a.label}】补记 +${a.delta} 积分`).join('；') +
+        (manualPoints ? `；另有积分长款 ${manualPoints}（流水多记/来源不明），已标记需人工核查，未自动扣减` : '') +
+        (live2.frozen.length ? `；${live2.frozen.length} 项冻结单据不一致需在风控申诉中处理` : '') +
+        (note.trim() ? `；备注：${note.trim()}` : '') + '；原始记录保留未改写')
+
+      // 重新对账刷新差异单（补偿流水/校正参与勾稽；P3 余额链随余额同步自愈）
+      const refreshed = this.runRecon(date, true)
+      if (refreshed.diffs.openCount === 0) bill0.status = 'compensated'
+      else bill0.status = 'reviewed' // 仍有长款/冻结类等需人工处理的差异
+
+      const parts = []
+      if (pointDelta) parts.push(`补记积分 +${pointDelta}`)
+      if (stockCount) parts.push(`校正 ${stockCount} 项库存`)
+      this.showToast(parts.length ? `🧮 补偿完成：${parts.join('，')}，余额与库存已同步` : '🧮 补偿已记录，剩余差异需人工处理',
+        refreshed.diffs.openCount === 0 ? 'success' : 'warn')
+      return { pointDelta, stockCount, manualPoints, actions }
+    },
+
+    // ===== 演示用：注入账实差异（模拟漏记/盘亏，便于观察对账→复核→补偿闭环） =====
+    // 仅制造"业务凭证存在、账目少记/实物缺失"，原始业务与库存规则保持完整，对账应能逐项检出
+    injectTaskFlowGap() {
+      // 模拟：一笔任务领奖台账已落、积分与流水却漏记（余额未加）→ P1 净额 + P2 台账缺笔
+      this.syncBusinessDay()
+      const d = this.todayDate
+      const marker = `inject-gap-${d}`
+      if (this.taskClaims.some((c) => c.id === marker)) {
+        this.showToast('今日已注入过漏记差异，请勿重复注入', 'warn')
+        return
+      }
+      this.taskClaims.push({
+        id: marker, taskId: 't-checkin', taskLabel: '每日签到（漏记演示）', reward: 30,
+        bizDate: d, grantDate: d, time: nowTime(), ts: Date.now(), source: 'manual-gap'
+      })
+      this.addAuditLog('recon-inject', null,
+        `【演示注入】${d} 一笔 30 积分任务奖励台账已落但积分与流水漏记，等待对账检出`)
+      this.showToast('🔧 已注入演示差异：30 积分任务奖励漏记（台账在、账目少）', 'warn')
+    },
+    injectStockLoss() {
+      // 模拟：商品实物盘亏 1 件（实物 remain 少 1，业务消耗记录不变）
+      this.syncBusinessDay()
+      const g = this.goods.find((x) => x.id === 'g1')
+      if (!g || g.remain <= 0) { this.showToast('g1 库存不足，无法注入盘亏', 'warn'); return }
+      g.remain -= 1
+      const d = this.todayDate
+      this.addAuditLog('recon-inject', null,
+        `【演示注入】${d} 商品【${g.name}】实物盘亏 1 件（业务记录完整、实物账少 1），等待对账检出`)
+      this.showToast('🔧 已注入演示差异：满50减10优惠券盘亏 1 件', 'warn')
     },
 
     // ===== 活动运营管理 =====
@@ -917,7 +1405,7 @@ export const usePlatformStore = defineStore('platform', {
         reviewedAt: `${this.todayDate} 09:10:12`
       })
 
-      // —— 5) 已撤销：视频会员周卡（80 积分已返还 + 库存已回补，故不动现库存） ——
+      // —— 5) 已撤销：视频会员周卡（80 积分冻结后返还 + 库存预占后回补，业务记录保留为 revoked） ——
       const rec5 = {
         id: 'seed-r5', type: 'redeem', status: 'revoked',
         date: this.todayDate, time: '08:30:05', ts: todayAt(8, 30),
@@ -934,6 +1422,13 @@ export const usePlatformStore = defineStore('platform', {
         createdAt: this.todayDate, time: '08:30:05', ts: todayAt(8, 30),
         reviewedAt: `${this.todayDate} 08:35:00`
       })
+      // 撤销前的冻结成本（与正常 freezeRedeem 一致：先扣 80、预占库存），08:35 撤销时返还 80、回补库存
+      this.points -= 80
+      this.pointRecords.unshift({
+        id: 'seed-pr5f', date: this.todayDate, time: '08:30:05', ts: todayAt(8, 30) + 1,
+        delta: -80, balance: this.points, note: '冻结：兑换【视频会员周卡】待风控审核', kind: 'frozen'
+      })
+      this.points += 80
       this.pointRecords.unshift({
         id: 'seed-pr5', date: this.todayDate, time: '08:35:00', ts: todayAt(8, 35),
         delta: 80, balance: this.points, note: '撤销返还：兑换【视频会员周卡】', kind: 'refund'
@@ -971,6 +1466,7 @@ export const usePlatformStore = defineStore('platform', {
         })
       })
       const pCardD1 = a1?.prizes.find((p) => p.id === 'p2')
+      // 与待审核单一致：remain 已扣、frozen 预占 1（放行核销 / 撤销回补）
       if (pCardD1) { pCardD1.remain -= 1; pCardD1.frozen += 1 }
       const rec6 = {
         id: 'seed-r6', type: 'draw', status: 'frozen',
@@ -989,8 +1485,18 @@ export const usePlatformStore = defineStore('platform', {
         createdAt: d1, time: '18:06:40', ts: todayAt(18, 6) - DAY, reviewedAt: ''
       })
 
-      // 初始可用积分 260：历史已入账（+15 任务结算、+80 撤销返还）与在途冻结（-10/-200）合并后起点补 470
-      this.points += 470
+      // —— 7) 历史业务日对账差异（演示）：上一业务日一笔 5 积分任务领奖台账已落、积分与流水漏记 ——
+      // 对账应在上一业务日差异单中检出（P1 净额 +5、P2 台账缺笔），运营复核后按跨日补偿补记，原始记录保留
+      this.taskClaims.push({
+        id: 'seed-tc-gap', taskId: 't-checkin', taskLabel: '每日签到（历史漏记）', reward: 5,
+        bizDate: d1, grantDate: d1, time: '18:40:00', ts: todayAt(18, 40) - DAY, source: 'manual-gap'
+      })
+
+      // 初始可用积分 255（含一笔历史漏记：业务台账 +5 未入账）：种子实时扣减 -210
+      // （在途冻结 -10/-200；已撤销兑换 -80 已 +80 返还，净 0），起点补 465 → 255。
+      // 种子流水合计 -200，rebalanceSeedPoints 倒推重放后链连续、最新快照 255。
+      // 对账检出并补偿历史漏记 +5 后余额 260，与补偿流水链配平。
+      this.points += 465
       // 修正流水余额快照（append-only，重排后顺序写入当时余额）
       this.rebalanceSeedPoints()
 

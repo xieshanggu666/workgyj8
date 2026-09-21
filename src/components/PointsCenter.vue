@@ -114,6 +114,9 @@
             <i v-if="p.kind === 'frozen'" class="f-tag frozen">冻结中</i>
             <i v-else-if="p.kind === 'refund'" class="f-tag refund">已返还</i>
             <i v-else-if="p.kind === 'release'" class="f-tag release">审核放行</i>
+            <i v-else-if="p.kind === 'task-comp'" class="f-tag comp">对账补记</i>
+            <i v-else-if="p.kind === 'recon-comp'" class="f-tag comp">对账补偿</i>
+            <em v-if="p.bizDate && p.bizDate !== p.date" class="f-cross">归属 {{ p.bizDate }}</em>
           </span>
           <span class="f-time">{{ p.time }} · {{ p.date }}</span>
           <span class="f-balance">余额 {{ p.balance }}</span>
@@ -242,4 +245,6 @@ const drawState = (taskId) => store.drawTaskState(taskId)
 .f-tag.frozen { background: rgba(129,212,250,0.15); color: #81d4fa; }
 .f-tag.refund { background: rgba(126,240,201,0.13); color: #7ef0c9; }
 .f-tag.release { background: rgba(76,175,80,0.16); color: #a5d6a7; }
+.f-tag.comp { background: rgba(77,182,172,0.18); color: #4db6ac; }
+.f-cross { font-style: normal; font-size: 9px; color: #ffd54f; margin-left: 6px; }
 </style>

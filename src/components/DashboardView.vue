@@ -52,6 +52,26 @@
         <div class="s-num ice">{{ store.dashboard.frozenPoints }}</div>
         <div class="s-lab">冻结积分</div>
       </div>
+      <div class="stat-card recon">
+        <span class="s-icon">🧮</span>
+        <div class="s-num recon-n">{{ store.dashboard.reconDays }}</div>
+        <div class="s-lab">对账业务日</div>
+      </div>
+      <div class="stat-card recon">
+        <span class="s-icon">📑</span>
+        <div class="s-num warn">{{ store.dashboard.reconOpen }}</div>
+        <div class="s-lab">待复核差异单</div>
+      </div>
+      <div class="stat-card recon">
+        <span class="s-icon">🧾</span>
+        <div class="s-num ok">{{ store.dashboard.reconCompensated }}</div>
+        <div class="s-lab">对账补偿积分</div>
+      </div>
+      <div class="stat-card recon">
+        <span class="s-icon">📦</span>
+        <div class="s-num ice">{{ store.dashboard.stockAdjCount }}</div>
+        <div class="s-lab">库存校正次数</div>
+      </div>
     </div>
 
     <!-- 活动概览 + 库存 -->
@@ -124,8 +144,11 @@ const rarityColor = (r) => PRIZE_RARITY[r]?.color || '#777'
 .s-icon { font-size: 22px; }
 .s-num { font-size: 26px; font-weight: 800; color: #4d8dff; margin: 6px 0 0; }
 .stat-card.risk { border-color: rgba(255,152,0,0.35); }
+.stat-card.recon { border-color: rgba(77,182,172,0.35); }
+.s-num.recon-n { color: #4db6ac; }
 .s-num.warn { color: #ffb74d; }
 .s-num.ice { color: #81d4fa; }
+.s-num.ok { color: #7ef0c9; }
 .s-lab { font-size: 11px; color: #8ba2c8; margin-top: 2px; }
 
 .dash-cards { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }
