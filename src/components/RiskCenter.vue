@@ -404,6 +404,10 @@ function doRevoke(o) {
 .l-action.config { background: rgba(171,71,188,0.16); color: #ce93d8; }
 .l-action.switch-role { background: rgba(120,160,220,0.12); color: #8ba2c8; }
 .l-action.day-rollover { background: rgba(129,212,250,0.14); color: #81d4fa; }
+.l-action.recon-run { background: rgba(38,198,218,0.16); color: #4dd0e1; }
+.l-action.recon-compensate { background: rgba(76,175,80,0.16); color: #7ef0c9; }
+.l-action.recon-waive { background: rgba(129,212,250,0.14); color: #81d4fa; }
+.l-action.stock-reset { background: rgba(255,193,7,0.14); color: #ffd54f; }
 .l-detail { flex: 1; color: #c6d2e6; line-height: 1.4; }
 .l-who { font-size: 11px; color: #9db0d0; flex-shrink: 0; }
 .l-time { font-size: 11px; color: #6f84ab; flex-shrink: 0; }

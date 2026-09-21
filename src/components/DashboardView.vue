@@ -52,6 +52,21 @@
         <div class="s-num ice">{{ store.dashboard.frozenPoints }}</div>
         <div class="s-lab">冻结积分</div>
       </div>
+      <div class="stat-card recon" :class="{ alert: store.dashboard.pendingDiffs > 0 }">
+        <span class="s-icon">🧮</span>
+        <div class="s-num" :class="{ warn: store.dashboard.pendingDiffs > 0 }">{{ store.dashboard.pendingDiffs }}</div>
+        <div class="s-lab">对账待复核差异</div>
+      </div>
+      <div class="stat-card recon">
+        <span class="s-icon">🗓️</span>
+        <div class="s-num recon-num">{{ store.dashboard.reconciledDays }}</div>
+        <div class="s-lab">已对账业务日</div>
+      </div>
+      <div class="stat-card recon">
+        <span class="s-icon">🛠️</span>
+        <div class="s-num recon-num">{{ store.dashboard.reconCompensations }}</div>
+        <div class="s-lab">对账补偿流水</div>
+      </div>
     </div>
 
     <!-- 活动概览 + 库存 -->
@@ -82,6 +97,26 @@
             </div>
           </div>
         </div>
+      </div>
+    </div>
+
+    <!-- 对账补偿记录 -->
+    <div class="card full" v-if="store.reconCompensations.length">
+      <div class="card-title">
+        🧮 积分库存对账
+        <span class="recon-link" @click="store.gotoTab('recon')">前往对账中心 ›</span>
+      </div>
+      <div class="recon-strip">
+        <span><b>{{ store.dashboard.reconciledDays }}</b> 个业务日已对账</span>
+        <span :class="{ warn: store.dashboard.pendingDiffs > 0 }"><b>{{ store.dashboard.pendingDiffs }}</b> 项差异待复核</span>
+        <span><b>{{ store.dashboard.reconCompensations }}</b> 笔补偿/挂账流水</span>
+        <span v-if="store.dashboard.reconCompPoints"><b>{{ store.dashboard.reconCompPoints > 0 ? '+' : '' }}{{ store.dashboard.reconCompPoints }}</b> 补偿积分净额</span>
+      </div>
+      <div class="comp-mini-row" v-for="c in store.reconCompensations.slice(0, 6)" :key="c.id">
+        <span class="cm-icon">{{ c.kind === 'waive' ? '📌' : '🛠️' }}</span>
+        <span class="cm-title">{{ c.targetName }} · {{ c.nature === 'stock' ? '库存账目' : c.nature === 'frozenPoints' ? '冻结积分' : '积分账目' }}</span>
+        <span class="cm-date">归属 {{ c.bizDate }}<i v-if="c.date !== c.bizDate">（{{ c.date }} 跨日执行）</i></span>
+        <span class="cm-kind" :class="c.kind">{{ c.kind === 'waive' ? '挂账' : '补偿' }}</span>
       </div>
     </div>
 
@@ -124,8 +159,24 @@ const rarityColor = (r) => PRIZE_RARITY[r]?.color || '#777'
 .s-icon { font-size: 22px; }
 .s-num { font-size: 26px; font-weight: 800; color: #4d8dff; margin: 6px 0 0; }
 .stat-card.risk { border-color: rgba(255,152,0,0.35); }
+.stat-card.recon { border-color: rgba(0,150,136,0.35); }
+.stat-card.recon.alert { box-shadow: 0 0 0 1px rgba(255,152,0,0.4); }
+.s-num.recon-num { color: #4dd0e1; }
 .s-num.warn { color: #ffb74d; }
 .s-num.ice { color: #81d4fa; }
+.recon-link { margin-left: auto; font-size: 11px; font-weight: 400; color: #4dd0e1; cursor: pointer; }
+.recon-strip { display: flex; gap: 18px; flex-wrap: wrap; font-size: 12px; color: #aebadd; margin-bottom: 10px; }
+.recon-strip b { color: #e8eefb; font-size: 14px; }
+.recon-strip .warn { color: #ffb74d; }
+.comp-mini-row { display: flex; align-items: center; gap: 10px; padding: 6px 0; border-bottom: 1px dashed rgba(120,160,220,0.08); font-size: 11px; }
+.comp-mini-row:last-child { border-bottom: none; }
+.cm-icon { font-size: 14px; }
+.cm-title { color: #dbe4f3; flex: 1; }
+.cm-date { color: #6f84ab; }
+.cm-date i { font-style: normal; color: #ffd54f; }
+.cm-kind { font-size: 10px; padding: 1px 8px; border-radius: 4px; }
+.cm-kind.compensate { background: rgba(76,175,80,0.16); color: #7ef0c9; }
+.cm-kind.waive { background: rgba(129,212,250,0.14); color: #81d4fa; }
 .s-lab { font-size: 11px; color: #8ba2c8; margin-top: 2px; }
 
 .dash-cards { display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; }

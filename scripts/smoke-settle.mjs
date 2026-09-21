@@ -16,11 +16,11 @@ const claimsOf = (bizDate) => s.taskClaims.filter((c) => c.bizDate === bizDate &
 console.log('— 种子台账（按业务日保留）—')
 const today = s.todayDate
 const books = s.taskDayBooks
-const d1Book = books.find((b) => !b.isToday && b.tasks[0].pending === 1)
+const d1Book = books.find((b) => !b.isToday && b.tasks[0].progress === 2)
 const d2Book = books[books.length - 1]
 assert(s.validDrawCount(today) === 1, `今日有效参与=1（实际 ${s.validDrawCount(today)}，已放行计入）`)
 assert(s.pendingDrawCount(today) === 2, `今日审核中=2（实际 ${s.pendingDrawCount(today)}，冻结暂缓计入）`)
-assert(d1Book && d1Book.tasks[0].progress === 2 && !d1Book.tasks[0].claim, '昨日 2/3 未达成（1 笔冻结暂缓）')
+assert(d1Book && d1Book.tasks[0].progress === 2 && !d1Book.tasks[0].claim, '昨日 2/3 未达成（2 笔冻结暂缓，含跨日在途）')
 assert(d2Book && d2Book.tasks[0].claim?.reward === 15, '前日 3/3 已结算 +15（台账保留）')
 assert(claimsOf(today).length === 0, '今日未结算')
 
@@ -71,7 +71,7 @@ assert(iphone.remain === 3 && iphone.frozen === 0, '撤销后库存回补、预�
 
 console.log('— 台账跨日隔离 —')
 const d1After = s.taskDayBooks.find((b) => b.date === d1)
-assert(d1After.tasks[0].progress === 3 && d1After.tasks[0].pending === 0, '昨日台账：3/3 已结算、无审核中')
+assert(d1After.tasks[0].progress === 3 && d1After.tasks[0].pending === 1, '昨日台账：3/3 已结算（另一笔跨日在途单仍审核中）')
 assert(s.taskDayBooks.length === 3, `台账按业务日分册（共 ${s.taskDayBooks.length} 日）`)
 
 console.log(failed ? `\n共 ${failed} 项失败` : '\n全部通过 🎉')
